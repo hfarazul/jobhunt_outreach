@@ -7,7 +7,7 @@ import os
 import re
 
 from ..config import Config
-from .base import LinkedInAdapter, Post, PostHit, ProspectHit
+from .base import JobDetail, JobHit, LinkedInAdapter, Post, PostHit, ProspectHit
 
 
 # Some company-scoped lookups fire very specific sub-queries:
@@ -77,6 +77,59 @@ class FakeAdapter(LinkedInAdapter):
                 posted_at="2026-05-17T12:00:00Z",
             ))
         return out
+
+    def resolve_location(self, keywords: str, *, limit: int = 5) -> list[tuple[str, str]]:
+        self._record("resolve_location", keywords, limit=limit)
+        # Deterministic fake id derived from the keyword so tests can assert.
+        return [(str(90000000 + len(keywords)), f"{keywords} Area (fake)")]
+
+    def search_jobs(self, keywords: str, *, region: str | None = None,
+                    date_posted: int | None = None, sort_by: str = "relevance",
+                    limit: int = 20) -> list[JobHit]:
+        self._record("search_jobs", keywords, region=region,
+                     date_posted=date_posted, sort_by=sort_by, limit=limit)
+        if os.environ.get("LINKEDIN_FAKE_EMPTY_SEARCH") == "1":
+            return []
+        out: list[JobHit] = []
+        for i in range(1, limit + 1):
+            out.append(JobHit(
+                job_id=f"{1000 + i}",
+                title=f"{keywords.title()} {i}",
+                company_name=f"Fake Co {i}",
+                company_identifier=f"fake-co-{i}",
+                location="London Area, United Kingdom",
+                url=f"https://www.linkedin.com/jobs/view/{1000 + i}",
+                posted_at="2026-06-11T09:00:00.000Z",
+            ))
+        return out
+
+    def get_job(self, job_id: str) -> JobDetail:
+        self._record("get_job", job_id)
+        # Fake hiring team: one talent lead + one engineering manager.
+        team = [
+            ProspectHit(
+                linkedin_url=f"https://www.linkedin.com/in/fake-talent-lead-{job_id}",
+                full_name=f"Talent Lead {job_id}", company=f"Fake Co {job_id}",
+                headline="Talent Lead", provider_id=f"ACoFakeTalent{job_id}",
+            ),
+            ProspectHit(
+                linkedin_url=f"https://www.linkedin.com/in/fake-eng-manager-{job_id}",
+                full_name=f"Eng Manager {job_id}", company=f"Fake Co {job_id}",
+                headline="Engineering Manager", provider_id=f"ACoFakeMgr{job_id}",
+            ),
+        ]
+        return JobDetail(
+            job_id=str(job_id),
+            title=f"AI Engineer (job {job_id})",
+            company_name=f"Fake Co {job_id}",
+            company_identifier=f"fake-co-{job_id}",
+            location="London Area, United Kingdom",
+            description="We're hiring an AI engineer to build production agent systems.",
+            apply_url="https://example.com/apply",
+            applicants=0,
+            posted_at="2026-06-11T09:00:00.000Z",
+            hiring_team=team,
+        )
 
     def get_recent_posts(self, linkedin_url: str, limit: int = 5) -> list[Post]:
         self._record("get_recent_posts", linkedin_url, limit=limit)

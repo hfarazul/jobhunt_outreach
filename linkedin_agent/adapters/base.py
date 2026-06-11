@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -45,10 +45,72 @@ class PostHit:
     posted_at: str | None = None
 
 
+@dataclass
+class JobHit:
+    """A single job posting from a jobs search."""
+    job_id: str
+    title: str
+    company_name: str | None = None
+    # LinkedIn company public_identifier (e.g. 'oxford-dynamics-limited') — used
+    # to find that company's hiring managers via people search.
+    company_identifier: str | None = None
+    location: str | None = None
+    url: str | None = None
+    posted_at: str | None = None
+
+
+@dataclass
+class JobDetail:
+    """Full detail for one job, including its LinkedIn-attached hiring team —
+    the people to actually reach out to for this role."""
+    job_id: str
+    title: str
+    company_name: str | None = None
+    company_identifier: str | None = None
+    location: str | None = None
+    description: str = ""
+    apply_url: str | None = None
+    applicants: int | None = None
+    posted_at: str | None = None
+    # The "Meet the hiring team" people LinkedIn attaches to the posting —
+    # usually a recruiter / talent lead and sometimes the hiring manager.
+    hiring_team: list[ProspectHit] = field(default_factory=list)
+
+
 class LinkedInAdapter(ABC):
     @abstractmethod
     def search(self, query: str, limit: int = 20) -> list[ProspectHit]:
         """Free-text people search. Returns ProspectHits, newest match first."""
+
+    def resolve_location(self, keywords: str, *, limit: int = 5) -> list[tuple[str, str]]:
+        """Resolve a location name (e.g. 'London') to candidate (id, title)
+        pairs usable as the `region` filter in search_jobs. The id is a numeric
+        LinkedIn geo id; pick the title that matches the intended place.
+
+        Default impl raises NotImplementedError — only adapters that support
+        the jobs API (UnipileAdapter) override."""
+        raise NotImplementedError("location resolution not supported by this adapter")
+
+    def search_jobs(
+        self, keywords: str, *, region: str | None = None,
+        date_posted: int | None = None, sort_by: str = "relevance",
+        limit: int = 20,
+    ) -> list["JobHit"]:
+        """Search LinkedIn job postings.
+
+        `region`: a numeric LOCATION id (from resolve_location) — LinkedIn's
+        primary location filter. Free-text city names in `keywords` do NOT
+        geo-filter; you must pass a region id.
+        `date_posted`: timespan in days since today (e.g. 7, 30).
+        `sort_by`: "relevance" (default) or "date".
+
+        Default impl raises NotImplementedError — override per adapter."""
+        raise NotImplementedError("jobs search not supported by this adapter")
+
+    def get_job(self, job_id: str) -> "JobDetail":
+        """Fetch full detail for one job, including its hiring_team. Default
+        impl raises NotImplementedError — override per adapter."""
+        raise NotImplementedError("job detail not supported by this adapter")
 
     def search_posts(
         self, keywords: str, *, limit: int = 20,

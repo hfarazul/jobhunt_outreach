@@ -215,6 +215,118 @@ def search_posts(keywords: str, limit: int, campaign: str | None,
 
 
 @cli.command()
+@click.argument("keywords")
+@click.option("--location", default=None, help="Location name to filter by (e.g. 'London', 'Berlin'). Resolved to a LinkedIn geo id.")
+@click.option("--date-posted", "date_posted", default=None, type=int, help="Only jobs posted within the last N days.")
+@click.option("--sort", "sort_by", default="date", type=click.Choice(["relevance", "date"]), help="Sort order.")
+@click.option("--limit", default=15, type=int, help="Max jobs to list.")
+def jobs(keywords: str, location: str | None, date_posted: int | None, sort_by: str, limit: int) -> None:
+    """Search LinkedIn job postings (read-only — does not import anything).
+
+    Free-text city names in KEYWORDS do NOT geo-filter; pass --location to
+    apply a real location filter. Use the printed job id with `job-import`."""
+    cfg, adapter = _adapter()
+    try:
+        region = None
+        if location:
+            cands = adapter.resolve_location(location)
+            if not cands:
+                console.print(f"[red]could not resolve location {location!r}[/red]")
+                sys.exit(1)
+            region, region_title = cands[0]
+            console.print(f"[dim]location {location!r} → {region_title} (id {region})[/dim]")
+        results = adapter.search_jobs(keywords, region=region, date_posted=date_posted,
+                                      sort_by=sort_by, limit=limit)
+        if not results:
+            console.print(f"[yellow]no jobs for {keywords!r}[/yellow]")
+            return
+        t = Table(show_header=True)
+        for col in ("job_id", "title", "company", "location", "posted"):
+            t.add_column(col)
+        for j in results:
+            t.add_row(j.job_id, (j.title or "—")[:40], (j.company_name or "—")[:28],
+                      (j.location or "—")[:28], (j.posted_at or "—")[:10])
+        console.print(t)
+        console.print(f"\n[dim]Pick the most relevant, then: linkedin job-import <job_id> --campaign <slug>[/dim]")
+    finally:
+        adapter.close()
+
+
+@cli.command("job-import")
+@click.argument("job_id")
+@click.option("--campaign", required=True, help="Campaign slug to attach the job's hiring contacts to.")
+@click.option("--with-managers/--no-managers", default=True, help="Also people-search the company for an eng lead / founder, not just the posting's hiring team.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show who would be imported without writing to the DB.")
+def job_import(job_id: str, campaign: str, with_managers: bool, dry_run: bool) -> None:
+    """Import a job's hiring contacts (and optionally company managers) as
+    prospects, stashing the role as pitch_context so the drafter references it.
+
+    Sources, in order: the posting's own `hiring_team` (recruiter / talent
+    lead), then — if --with-managers — a people-search of the company for an
+    engineering lead or founder. Downstream react → connect → DM flow is
+    unchanged; the connect note will reference this specific role."""
+    cfg, adapter = _adapter()
+    try:
+        row = db.get_campaign(campaign)
+        if not row:
+            console.print(f"[red]no campaign with slug {campaign!r}[/red]")
+            sys.exit(1)
+        campaign_id = int(row["id"])
+
+        safety.check_cap(cfg, "search")
+        job = adapter.get_job(job_id)
+        ctx = (f"{job.company_name} is hiring: {job.title}"
+               + (f" ({job.location})" if job.location else "")
+               + (f". Role: {job.url}" if getattr(job, "url", None) else "")
+               + (f". {job.description[:300]}" if job.description else "")).strip()
+        console.print(f"[bold]{job.title}[/bold] @ {job.company_name or '—'} — {job.location or '—'}")
+        console.print(f"  applicants: {job.applicants if job.applicants is not None else '—'} · job_id {job.job_id}")
+
+        # 1) the posting's hiring team
+        contacts = list(job.hiring_team)
+        # 2) optional: company managers via people search
+        if with_managers and job.company_name:
+            for q in (f"{job.company_name} founder", f"{job.company_name} head of engineering"):
+                try:
+                    for h in adapter.search(q, limit=3):
+                        if job.company_name.lower() in (h.headline or "").lower():
+                            contacts.append(h)
+                            break
+                except Exception:
+                    continue
+
+        # de-dup by linkedin_url
+        seen: set[str] = set()
+        imported = 0
+        for h in contacts:
+            if not h.linkedin_url or h.linkedin_url in seen:
+                continue
+            seen.add(h.linkedin_url)
+            kind = "hiring team" if h in job.hiring_team else "manager"
+            console.print(f"  · [cyan]{h.full_name or '—'}[/cyan] — {(h.headline or kind)[:50]}  {h.linkedin_url}")
+            if not dry_run:
+                pid = db.upsert_prospect(
+                    linkedin_url=h.linkedin_url, full_name=h.full_name,
+                    headline=h.headline, company=h.company or job.company_name,
+                    location=h.location, campaign_id=campaign_id,
+                    pitch_context=ctx, provider_id=h.provider_id,
+                )
+                db.set_pitch_context(pid, ctx)  # force-refresh even on re-import
+                db.log_action(pid, "job-import",
+                              json.dumps({"job_id": job.job_id, "title": job.title,
+                                          "company": job.company_name, "campaign": campaign}),
+                              h.linkedin_url, cfg.dry_run)
+                imported += 1
+        if dry_run:
+            console.print(f"\n[yellow]dry-run — would import {len(seen)} contact(s)[/yellow]")
+        else:
+            console.print(f"\n[green]✓[/green] imported {imported} contact(s) → campaign [bold]{campaign}[/bold] "
+                          f"(status: targeted). Review with: linkedin pipeline --status targeted")
+    finally:
+        adapter.close()
+
+
+@cli.command()
 @click.argument("prospect_id", type=int)
 @click.option("--limit", default=3)
 def posts(prospect_id: int, limit: int) -> None:

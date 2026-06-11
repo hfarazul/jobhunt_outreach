@@ -6,7 +6,9 @@ from __future__ import annotations
 # SDK source is authoritative.
 #
 # Verified endpoints used by this adapter:
-#   POST  /linkedin/search                         (search people)
+#   POST  /linkedin/search                         (search people / posts / jobs)
+#   GET   /linkedin/search/parameters              (resolve LOCATION/etc. filter ids)
+#   GET   /linkedin/jobs/{job_id}                  (job detail incl. hiring_team)
 #   GET   /users/{public_identifier_or_provider_id} (resolve profile)
 #   GET   /users/{provider_id}/posts               (recent activity)
 #   POST  /posts/reaction                          (react to a post)
@@ -19,7 +21,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import Config
-from .base import LinkedInAdapter, Post, PostHit, ProspectHit
+from .base import JobDetail, JobHit, LinkedInAdapter, Post, PostHit, ProspectHit
 
 
 _PROVIDER_ID_RE = re.compile(r"^ACo[A-Za-z0-9_\-]+$")
@@ -139,6 +141,85 @@ class UnipileAdapter(LinkedInAdapter):
                 posted_at=it.get("date"),
             ))
         return out
+
+    # -------------------------------------------------------------------- jobs
+
+    def resolve_location(self, keywords: str, *, limit: int = 5) -> list[tuple[str, str]]:
+        r = self._client.get(
+            "/linkedin/search/parameters",
+            params={"account_id": self.cfg.unipile_account_id,
+                    "type": "LOCATION", "keywords": keywords, "limit": limit},
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        return [(str(it["id"]), it.get("title", "")) for it in items[:limit] if it.get("id")]
+
+    def search_jobs(
+        self, keywords: str, *, region: str | None = None,
+        date_posted: int | None = None, sort_by: str = "relevance",
+        limit: int = 20,
+    ) -> list[JobHit]:
+        body: dict = {"api": "classic", "category": "jobs", "keywords": keywords,
+                      "sort_by": sort_by}
+        if region:
+            body["region"] = str(region)
+        if date_posted is not None:
+            body["date_posted"] = date_posted
+        r = self._client.post(
+            "/linkedin/search",
+            params={"account_id": self.cfg.unipile_account_id, "limit": limit},
+            json=body,
+        )
+        r.raise_for_status()
+        out: list[JobHit] = []
+        for it in r.json().get("items", [])[:limit]:
+            co = it.get("company") or {}
+            out.append(JobHit(
+                job_id=str(it.get("id")),
+                title=it.get("title") or "",
+                company_name=co.get("name"),
+                company_identifier=co.get("public_identifier"),
+                location=it.get("location"),
+                url=it.get("url"),
+                posted_at=it.get("posted_at"),
+            ))
+        return out
+
+    def get_job(self, job_id: str) -> JobDetail:
+        r = self._client.get(
+            f"/linkedin/jobs/{job_id}",
+            params={"account_id": self.cfg.unipile_account_id},
+        )
+        r.raise_for_status()
+        d = r.json()
+        co = d.get("company")
+        company_name = co.get("name") if isinstance(co, dict) else (co if isinstance(co, str) else None)
+        company_identifier = co.get("public_identifier") if isinstance(co, dict) else d.get("company_id")
+        team: list[ProspectHit] = []
+        for m in d.get("hiring_team") or []:
+            slug = m.get("public_identifier")
+            url = (f"https://www.linkedin.com/in/{slug}" if slug
+                   else m.get("profile_url") or "")
+            if not url:
+                continue
+            team.append(ProspectHit(
+                linkedin_url=url,
+                full_name=(m.get("name") or "").strip() or None,
+                company=company_name,
+                provider_id=m.get("provider_id"),
+            ))
+        return JobDetail(
+            job_id=str(d.get("id") or job_id),
+            title=d.get("title") or "",
+            company_name=company_name,
+            company_identifier=company_identifier,
+            location=d.get("location"),
+            description=(d.get("description") or "")[:5000],
+            apply_url=d.get("apply_url"),
+            applicants=d.get("applicants_counter"),
+            posted_at=d.get("published_at") or d.get("created_at"),
+            hiring_team=team,
+        )
 
     # ------------------------------------------------------------------ profile
 
