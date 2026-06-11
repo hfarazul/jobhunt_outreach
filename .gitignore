@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+
+# Local state
+data/
+playwright_state/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
