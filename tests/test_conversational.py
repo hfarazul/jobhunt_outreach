@@ -268,7 +268,7 @@ def test_daemon_routes_freeform_text_to_conversational_handler(db_env, monkeypat
     daemon, fake_tg = _make_daemon(cfg)
 
     # Stub the conversational invoker
-    monkeypatch.setattr(conv_mod, "_invoke_claude",
+    monkeypatch.setattr(conv_mod, "_invoke_agent",
                          lambda prompt, timeout=30: '{"type": "info", "info_text": "stub reply"}')
 
     msg = {
@@ -298,8 +298,8 @@ def test_daemon_ignores_slash_commands(db_env):
 
     # Patch invoker to fail loudly if called
     import linkedin_agent.conversational as cm
-    original = cm._invoke_claude
-    cm._invoke_claude = forbidden
+    original = cm._invoke_agent
+    cm._invoke_agent = forbidden
     try:
         msg = {
             "chat": {"id": cfg.telegram_chat_id},
@@ -307,7 +307,7 @@ def test_daemon_ignores_slash_commands(db_env):
         }
         daemon._dispatch({"update_id": 1, "message": msg})
     finally:
-        cm._invoke_claude = original
+        cm._invoke_agent = original
         daemon.close()
 
 
@@ -319,7 +319,7 @@ def test_daemon_audit_logs_conversational_interactions(db_env, monkeypatch):
     cfg = _cfg()
     daemon, fake_tg = _make_daemon(cfg)
 
-    monkeypatch.setattr(conv_mod, "_invoke_claude",
+    monkeypatch.setattr(conv_mod, "_invoke_agent",
                          lambda prompt, timeout=30: '{"type": "info", "info_text": "audited reply"}')
 
     msg = {

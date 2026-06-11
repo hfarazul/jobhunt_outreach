@@ -1,27 +1,32 @@
 # Job-Hunt Outreach Agent
 
-Warm, one-to-one LinkedIn outreach for a job search — driven by Claude Code.
+Warm, one-to-one LinkedIn outreach for a job search — driven by your coding agent (Claude Code, Codex, Cursor, Gemini, …).
 
 The candidate reaches out to the people who can hire, refer, or influence hiring for the role they want (hiring managers, engineering leaders, founders, recruiters). Every message references something specific and positions the candidate as a strong, selective professional. It is **not** mass-applying and **not** generic "I'm looking for a job" spam.
 
-Each job-seeker is configured as a **campaign** (their background, target role, geography). One deployment runs one person's search under one LinkedIn account, with daily safety caps and a human-in-the-loop Telegram approval step.
+Each job-seeker is configured as a **campaign** (their background, target role, geography). One deployment runs one person's search under one LinkedIn account, with daily safety caps and a human-in-the-loop approval step.
 
-## How it works
+## Two ways to run (no LLM API key — drafting uses a coding-agent CLI)
+
+1. **Interactive (any agent).** You drive the CLI directly — search, review, draft the message yourself from the brief, send via `linkedin connect/dm`. You are the human-in-the-loop, so **Telegram is not needed**. Works with any agent; nothing is Claude-specific.
+2. **Unattended (cron).** `linkedin daily` runs autonomously and drafts by shelling out to a coding-agent CLI (`claude` / `codex` / `cursor-agent` / `gemini`, configurable via `DRAFTER_AGENT`). Here **Telegram is the optional approval channel** — Approve/Edit/Reject on your phone. Without Telegram creds it still runs and just skips notifications.
 
 ```
 campaign brief (markdown)
         │
         ▼
-hourly cron (`linkedin daily`)  →  drafts via the message-drafter subagent
-        │
-        ▼
-Telegram bot (Approve / Edit / Reject on your phone)
-        │
-        ▼
-Unipile API → LinkedIn
+you drive the CLI  ── or ──  hourly cron (`linkedin daily`) drafts via a coding-agent CLI
+        │                                   │
+        ▼                                   ▼
+   you review + send          human review (you, or Telegram Approve/Edit/Reject)
+                                            │
+                                            ▼
+                                   Unipile API → LinkedIn
 ```
 
 Pipeline: `targeted → reacted → connection_sent → connected → dm_sent → replied`, gated by daily caps (default 30 reactions / 20 connections / 10 DMs) and a 9-5 Mon-Fri send window.
+
+See `AGENTS.md` (the canonical agent guide; `CLAUDE.md` points to it) for the full playbook.
 
 ## Quick start
 
@@ -92,12 +97,13 @@ On a dedicated always-on Mac: install the bot daemon with `scripts/install_launc
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your Unipile and Telegram credentials. Key vars:
+Copy `.env.example` to `.env` and fill in your Unipile credentials. Key vars:
 
-- `UNIPILE_API_KEY` / `UNIPILE_ACCOUNT_ID` / `UNIPILE_DSN` — LinkedIn access via Unipile
-- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — approval bot
+- `UNIPILE_API_KEY` / `UNIPILE_ACCOUNT_ID` / `UNIPILE_DSN` — LinkedIn access via Unipile (**required**)
 - `DAILY_MAX_*` — rate caps
 - `LINKEDIN_DB_PATH` — override the SQLite location (default `data/outreach.db`)
+- `DRAFTER_AGENT` / `DRAFTER_AGENT_CMD` — *optional*; which coding-agent CLI the **unattended** drafter uses (auto-detects `claude` / `codex` / `cursor-agent` / `gemini` if unset)
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — *optional*; only for unattended phone-approval. The interactive flow needs neither.
 
 ## Tests
 

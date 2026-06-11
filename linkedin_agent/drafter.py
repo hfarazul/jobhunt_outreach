@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-# The drafter shells out to `claude -p` using the same system prompt as the
-# interactive message-drafter subagent. Both code paths read the prompt from
-# .claude/agents/message-drafter.md so there's a single source of truth.
+# The autonomous drafter shells out to a coding-agent CLI (Claude Code, Codex,
+# Cursor, or Gemini — see agent_cli) using the message-drafter prompt. Both this
+# and the interactive subagent read .claude/agents/message-drafter.md, so
+# there's a single source of truth.
 #
-# No Anthropic API key needed — this uses your existing Claude Code auth.
+# No LLM API key needed — this uses whatever agent you already have
+# authenticated on the machine. When a human drives an agent interactively, the
+# agent writes drafts itself and this path isn't used at all.
 
 import json
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Sequence
 
+from . import agent_cli
 from . import campaigns as campaigns_mod
 from . import db
 
@@ -55,7 +57,7 @@ KIND_MIN_CHARS = {
     "reply": 80,
 }
 
-# Auto-retry budget. The drafter is stochastic — a fresh `claude -p` call
+# Auto-retry budget. The drafter is stochastic — a fresh agent call
 # usually fixes oversize/empty/short outputs. INSUFFICIENT_CONTEXT is terminal
 # (no retry) because that's the drafter being honestly stuck.
 MAX_DRAFT_ATTEMPTS = 3
@@ -215,7 +217,7 @@ def build_input(
 
 
 def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
-    """Compose the full prompt sent to claude -p: subagent body + JSON context.
+    """Compose the full prompt sent to the agent: subagent body + JSON context.
 
     On retry, an optional hint is appended to nudge the next attempt toward
     fixing the specific failure (oversize, too-short, etc.)."""
@@ -229,65 +231,31 @@ def render_prompt(inp: DrafterInput, retry_hint: str | None = None) -> str:
 
 # -------------------------------------------------------------- claude invoker
 
-def _invoke_claude(prompt: str, timeout: int = 90) -> str:
-    """Run `claude -p` and return stdout. Separated for test stubbing.
+def _invoke_agent(prompt: str, timeout: int = 90) -> str:
+    """Run the configured coding agent one-shot and return stdout. Separated
+    for test stubbing. Routes through agent_cli, which picks Claude Code /
+    Codex / Cursor / Gemini (or a DRAFTER_AGENT_CMD override).
 
-    stdin is explicitly closed via DEVNULL. Without this, in non-TTY contexts
-    (cron, launchd) claude waits 3s for stdin then in some cases exits 1
-    with empty stderr — the exact "claude -p exited 1" failure mode we kept
-    hitting. Interactive shells dodge this because stdin is a TTY."""
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        raise DrafterError("`claude` binary not on PATH — is Claude Code installed?")
-    proc = subprocess.run(
-        [claude_bin, "-p", prompt, "--output-format", "text"],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
-    if proc.returncode != 0:
-        raise DrafterError(
-            f"claude -p exited {proc.returncode}\nstderr:\n{proc.stderr[:500]}"
-        )
-    return proc.stdout
+    stdin is closed via DEVNULL inside agent_cli — in non-TTY contexts (cron,
+    launchd) some agent CLIs otherwise block on stdin then exit non-zero."""
+    try:
+        return agent_cli.invoke(prompt, timeout=timeout)
+    except agent_cli.AgentError as e:
+        raise DrafterError(str(e)) from e
 
 
 def warmup_auth(timeout: int = 20) -> bool:
-    """Single trivial `claude -p` call to serialize any pending OAuth refresh
-    before the drafter is hit in rapid succession. Returns True if the call
-    returned 0, False otherwise. Never raises — best-effort.
+    """Single trivial agent call to serialize any pending auth refresh before
+    the drafter is hit in rapid succession. Returns True if the call returned
+    0, False otherwise. Never raises — best-effort.
 
-    Why this exists: when the daily cron fires multiple drafter calls in
-    quick succession, an OAuth token mid-refresh causes some of them to fail
-    with `claude -p exited 1` (empty stderr). This warmup forces the token
-    refresh to complete BEFORE we make parallel drafter calls. Verified
-    against incident 2026-05-20 where 4/4 dm1 drafts failed at 12:31 UTC,
-    the same minute the credentials.json was rewritten. Cost: 1-3 seconds
-    on a hot start, ~5-15 seconds when refresh actually fires."""
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        # No claude binary on PATH — surfaces in tests + dev environments
-        # without Claude Code installed. Production cron always has it.
-        return False
-    try:
-        proc = subprocess.run(
-            [claude_bin, "-p", "ok", "--output-format", "text"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-        if proc.returncode != 0:
-            return False
-        return True
-    except Exception:
-        # Timeouts, OSError, anything — warmup is best-effort, never blocks
-        # the real cron run. The downstream drafter calls will surface real
-        # failures normally.
-        return False
+    Why this exists: when the daily cron fires multiple drafter calls in quick
+    succession, an auth token mid-refresh (e.g. Claude Code's OAuth) causes
+    some to fail. This warmup forces the refresh to complete BEFORE the burst.
+    Verified against incident 2026-05-20 where 4/4 dm1 drafts failed at 12:31
+    UTC, the same minute the credentials were rewritten. No-op when no agent
+    CLI is installed (e.g. tests)."""
+    return agent_cli.warmup(timeout=timeout)
 
 
 # -------------------------------------------------------------- output cleanup
@@ -331,7 +299,7 @@ def draft(
 
     for attempt in range(1, max_attempts + 1):
         prompt = render_prompt(inp, retry_hint=retry_hint)
-        raw = _invoke_claude(prompt)
+        raw = _invoke_agent(prompt)
         body = _clean_output(raw)
 
         # INSUFFICIENT_CONTEXT is terminal — the drafter is telling us there

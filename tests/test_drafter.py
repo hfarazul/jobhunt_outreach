@@ -1,6 +1,6 @@
 """Tests for the drafter module.
 
-Unit tests stub `_invoke_claude` so we can verify the prompt-building,
+Unit tests stub `_invoke_agent` so we can verify the prompt-building,
 output cleaning, and validation logic without actually invoking Claude Code.
 """
 
@@ -84,7 +84,7 @@ def test_draft_rejects_empty_output(monkeypatch, db_env):
     from linkedin_agent import db
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
-    monkeypatch.setattr(drafter, "_invoke_claude", lambda prompt, timeout=90: "")
+    monkeypatch.setattr(drafter, "_invoke_agent", lambda prompt, timeout=90: "")
     with pytest.raises(DrafterError, match="empty"):
         drafter.draft("dm1", pid)
 
@@ -95,7 +95,7 @@ def test_draft_rejects_insufficient_context_marker(monkeypatch, db_env):
     from linkedin_agent import db
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
-    monkeypatch.setattr(drafter, "_invoke_claude", lambda prompt, timeout=90: INSUFFICIENT)
+    monkeypatch.setattr(drafter, "_invoke_agent", lambda prompt, timeout=90: INSUFFICIENT)
     with pytest.raises(DrafterError, match="INSUFFICIENT_CONTEXT"):
         drafter.draft("dm1", pid)
 
@@ -108,7 +108,7 @@ def test_draft_gives_up_when_all_attempts_oversize(monkeypatch, db_env):
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
     oversize = "a" * 400
-    monkeypatch.setattr(drafter, "_invoke_claude", lambda prompt, timeout=90: oversize)
+    monkeypatch.setattr(drafter, "_invoke_agent", lambda prompt, timeout=90: oversize)
     with pytest.raises(DrafterError, match="all 3 drafter attempts failed"):
         drafter.draft("connect_note", pid)
 
@@ -133,7 +133,7 @@ def test_draft_returns_cleaned_body_on_success(monkeypatch, db_env):
     )
     monkeypatch.setattr(
         drafter,
-        "_invoke_claude",
+        "_invoke_agent",
         lambda prompt, timeout=90: f"```\n{body}\n```",
     )
     result = drafter.draft("dm1", pid)
@@ -172,7 +172,7 @@ def test_build_input_uses_no_campaign_when_unattached(db_env):
 # ===== retry logic ==========================================================
 
 class _StubInvoker:
-    """Returns a queue of responses to _invoke_claude — one per attempt.
+    """Returns a queue of responses to _invoke_agent — one per attempt.
     Useful for testing the retry loop without burning real claude -p calls."""
 
     def __init__(self, responses):
@@ -198,7 +198,7 @@ def test_draft_retries_on_oversize_and_succeeds(monkeypatch, db_env):
     assert len(clean) >= drafter.KIND_MIN_CHARS["connect_note"]
 
     stub = _StubInvoker([oversize, clean])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("connect_note", pid)
     assert result == clean
@@ -215,7 +215,7 @@ def test_draft_retries_on_too_short_and_succeeds(monkeypatch, db_env):
     too_short = "Hi there."       # 9 chars, below 100-char min for connect_note
     clean = "X" * 200             # well within the band
     stub = _StubInvoker([too_short, clean])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("connect_note", pid)
     assert result == clean
@@ -230,7 +230,7 @@ def test_draft_retries_on_empty_output(monkeypatch, db_env):
 
     clean = "X" * 200
     stub = _StubInvoker(["", clean])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("connect_note", pid)
     assert result == clean
@@ -245,7 +245,7 @@ def test_draft_gives_up_after_max_attempts(monkeypatch, db_env):
     # All 3 attempts return oversize content
     oversize = "X" * 400
     stub = _StubInvoker([oversize, oversize, oversize])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     with pytest.raises(drafter.DrafterError, match="all 3 drafter attempts failed"):
         drafter.draft("connect_note", pid)
@@ -259,7 +259,7 @@ def test_draft_does_not_retry_on_insufficient_context(monkeypatch, db_env):
     pid = db.upsert_prospect("https://www.linkedin.com/in/test", full_name="Test User")
 
     stub = _StubInvoker([drafter.INSUFFICIENT, "X" * 200])   # second response should never run
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     with pytest.raises(drafter.DrafterError, match="INSUFFICIENT_CONTEXT"):
         drafter.draft("connect_note", pid)
@@ -274,7 +274,7 @@ def test_draft_first_attempt_clean_does_not_retry(monkeypatch, db_env):
 
     clean = "X" * 200
     stub = _StubInvoker([clean, "extra response that should never run"])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("connect_note", pid)
     assert result == clean
@@ -322,7 +322,7 @@ def test_draft_retries_on_spam_tell(monkeypatch, db_env):
             "Would love to connect and learn more about your space. " * 3)
     clean = "Your recent post on engineering velocity stood out. " + "X" * 150
     stub = _StubInvoker([spam, clean])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("connect_note", pid)
     assert result == clean
@@ -380,7 +380,7 @@ def test_draft_retries_on_audience_label(monkeypatch, db_env):
              "v1s on tight timelines and would love to hear what you're building. "
              + "X" * 60)
     stub = _StubInvoker([labeled, clean])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("connect_note", pid)
     assert result == clean
@@ -492,7 +492,7 @@ def test_draft_reply_succeeds_with_well_formed_body(monkeypatch, db_env):
         "most time at the firm today — deal flow, monitoring, or memos? "
         "Drop a couple slots that work for you and I'll lock one in."
     )
-    monkeypatch.setattr(drafter, "_invoke_claude", lambda prompt, timeout=90: body)
+    monkeypatch.setattr(drafter, "_invoke_agent", lambda prompt, timeout=90: body)
     result = drafter.draft("reply", pid)
     assert result == body
 
@@ -508,7 +508,7 @@ def test_draft_reply_rejects_one_word_ack(monkeypatch, db_env):
     too_short = "Got it."
     long_enough = "Glad you're open — what shape does your team's current automation footprint look like at the moment?"
     stub = _StubInvoker([too_short, long_enough])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     result = drafter.draft("reply", pid)
     assert result == long_enough
@@ -527,7 +527,7 @@ def test_draft_gives_up_after_3_spam_attempts(monkeypatch, db_env):
     spam_c = "Hope you're doing well! Curious to chat. " + "X" * 200
 
     stub = _StubInvoker([spam_a, spam_b, spam_c])
-    monkeypatch.setattr(drafter, "_invoke_claude", stub)
+    monkeypatch.setattr(drafter, "_invoke_agent", stub)
 
     with pytest.raises(drafter.DrafterError, match="all 3 drafter attempts failed"):
         drafter.draft("connect_note", pid)

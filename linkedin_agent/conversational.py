@@ -19,14 +19,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import db, safety
+from . import agent_cli, db, safety
 from .config import Config
 
 logger = logging.getLogger("linkedin.conversational")
@@ -168,39 +168,38 @@ def _truncate_context(ctx: dict, max_chars: int = _CONTEXT_MAX_CHARS) -> dict:
     return ctx
 
 
-# --------------------------------------------------------------- claude
+# --------------------------------------------------------------- agent
 
-def _invoke_claude(prompt: str, timeout: int = _CLAUDE_TIMEOUT_SEC) -> str:
-    """Run `claude -p` and return stdout. Separated for stubbing in tests.
+def _invoke_agent(prompt: str, timeout: int = _CLAUDE_TIMEOUT_SEC) -> str:
+    """Run the configured coding agent (Claude Code / Codex / Cursor / Gemini)
+    and return stdout. Separated for stubbing in tests.
 
-    Does NOT raise on non-zero exit — wraps the failure in a JSON info
-    response so the caller can still send something useful to the user."""
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
+    Does NOT raise on failure — wraps it in a JSON info response so the caller
+    can still send something useful to the user."""
+    try:
+        has_agent = agent_cli.resolve_agent() is not None
+    except agent_cli.AgentError:
+        has_agent = False
+    if not has_agent and not os.getenv("DRAFTER_AGENT_CMD"):
         return json.dumps({
             "type": "info",
-            "info_text": "⚠️ Claude binary not on PATH — can't process conversational requests.",
+            "info_text": "⚠️ No coding-agent CLI on PATH — can't process conversational requests.",
         })
     try:
-        proc = subprocess.run(
-            [claude_bin, "-p", prompt, "--output-format", "text"],
-            capture_output=True, text=True, timeout=timeout, check=False,
-            stdin=subprocess.DEVNULL,
-        )
+        return agent_cli.invoke(prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
         return json.dumps({
             "type": "info",
-            "info_text": "⏱️ Claude timed out. Try a more specific question?",
+            "info_text": "⏱️ The agent timed out. Try a more specific question?",
         })
-    if proc.returncode != 0:
-        # Same shape as drafter's flaky-claude failure mode. Return a
-        # friendly response instead of crashing.
-        logger.warning("conversational claude exited %d", proc.returncode)
+    except agent_cli.AgentError:
+        # Same shape as drafter's flaky-agent failure mode. Return a friendly
+        # response instead of crashing.
+        logger.warning("conversational agent call failed")
         return json.dumps({
             "type": "info",
-            "info_text": "⚠️ Claude call failed. Try again or check `data/bot-daemon.err.log`.",
+            "info_text": "⚠️ Agent call failed. Try again or check `data/bot-daemon.err.log`.",
         })
-    return proc.stdout
 
 
 # --------------------------------------------------------------- parsing
@@ -273,12 +272,12 @@ def handle_message(
     Returns ConversationalResult with the text to post back. Caller (bot
     daemon) is responsible for actually posting + audit logging.
 
-    `invoker` is the function used to call claude. When None (production),
-    resolves `_invoke_claude` at call time — late binding so tests that
+    `invoker` is the function used to call the agent. When None (production),
+    resolves `_invoke_agent` at call time — late binding so tests that
     monkeypatch the module-level reference take effect. Tests can also
     pass a stub directly via this parameter."""
     if invoker is None:
-        invoker = _invoke_claude
+        invoker = _invoke_agent
     if not text or not text.strip():
         return ConversationalResult(
             type="info", text="(empty message)", raw_claude_output="",
